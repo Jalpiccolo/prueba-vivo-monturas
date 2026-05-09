@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:'Inter',sans-serif; background:#f8f8f8; overflow-x:hidden; }
+  #container { position:relative; width:100%; max-width:700px; margin:0 auto; }
+  #canvas { width:100%; border-radius:12px; display:block; background:#000; }
+  #guide { position:absolute; bottom:12px; left:50%; transform:translateX(-50%);
+    background:rgba(0,0,0,0.6); color:#fff; padding:8px 16px; border-radius:8px;
+    font-size:14px; display:none; text-align:center; }
+  #thumbs { display:flex; flex-wrap:wrap; gap:8px; justify-content:center;
+    padding:12px 4px; }
+  .thumb { width:80px; height:50px; object-fit:contain; border:2px solid #ccc;
+    border-radius:8px; cursor:pointer; background:#fff; padding:4px;
+    transition:.2s; }
+  .thumb.active { border:3px solid #d07b89; }
+  .thumb:hover { border-color:#328e7e; }
+  .tname { font-size:10px; text-align:center; max-width:80px; overflow:hidden;
+    text-overflow:ellipsis; white-space:nowrap; }
+  .titem { display:flex; flex-direction:column; align-items:center; gap:2px; }
+  #capture { display:block; margin:12px auto; padding:14px 32px; font-size:16px;
+    font-weight:bold; background:#328e7e; color:#fff; border:none;
+    border-radius:8px; cursor:pointer; }
+  #capture:hover { background:#172d54; }
+  #loading { text-align:center; padding:40px; color:#666; font-size:18px; }
+  #error { text-align:center; padding:20px; color:#c00; display:none; }
+</style>
+</head>
+<body>
+<div id="loading">⏳ Cargando modelo de detección facial...</div>
+<div id="error">
+  <p>⚠️ No se pudo acceder a la cámara.</p>
+  <p style="font-size:14px;margin-top:8px;">Verifica los permisos del navegador y que estés en HTTPS.</p>
+</div>
+<div id="container" style="display:none;">
+  <video id="video" autoplay playsinline style="display:none;"></video>
+  <canvas id="canvas"></canvas>
+  <div id="guide">Mira al frente y acércate a la luz</div>
+</div>
+<div id="thumbs"></div>
+<button id="capture" style="display:none;">📸 Descargar captura</button>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4/face_mesh.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3/camera_utils.js"></script>
+<script>
+// Glasses data is injected by Python as: window.GLASSES_DATA = [...]
+const glassesData = window.GLASSES_DATA || [];
+let currentIdx = 0;
+let glassesImg = new Image();
+
+// Build thumbnails
+const thumbsDiv = document.getElementById('thumbs');
+glassesData.forEach((g, i) => {
+  const item = document.createElement('div');
+  item.className = 'titem';
+  const img = document.createElement('img');
+  img.className = 'thumb' + (i === 0 ? ' active' : '');
+  img.src = 'data:image/png;base64,' + g.b64;
+  img.onclick = () => selectGlasses(i);
+  const name = document.createElement('div');
+  name.className = 'tname';
+  name.textContent = g.nombre;
+  item.appendChild(img);
+  item.appendChild(name);
+  thumbsDiv.appendChild(item);
+});
+
+function selectGlasses(idx) {
+  currentIdx = idx;
+  glassesImg = new Image();
+  glassesImg.src = 'data:image/png;base64,' + glassesData[idx].b64;
+  document.querySelectorAll('.thumb').forEach((el, i) => {
+    el.className = 'thumb' + (i === idx ? ' active' : '');
+  });
+}
+
+if (glassesData.length > 0) {
+  glassesImg.src = 'data:image/png;base64,' + glassesData[0].b64;
+}
+
+// Setup
+const video = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const container = document.getElementById('container');
+const guideEl = document.getElementById('guide');
+const loadingEl = document.getElementById('loading');
+const errorEl = document.getElementById('error');
+const captureBtn = document.getElementById('capture');
+
+const faceMesh = new FaceMesh({
+  locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4/${f}`
+});
+faceMesh.setOptions({
+  maxNumFaces: 1,
+  refineLandmarks: true,
+  minDetectionConfidence: 0.5,
+  minTrackingConfidence: 0.5
+});
+
+faceMesh.onResults((results) => {
+  ctx.save();
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  // Mirror video (selfie mode)
+  ctx.translate(canvas.width, 0);
+  ctx.scale(-1, 1);
+  ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
+  ctx.restore();
+
+  if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
+    const lm = results.multiFaceLandmarks[0];
+    // Iris landmarks (mirrored x)
+    const li = lm[468], ri = lm[473];
+    const xi = (1 - li.x) * canvas.width, yi = li.y * canvas.height;
+    const xd = (1 - ri.x) * canvas.width, yd = ri.y * canvas.height;
+
+    const x1 = Math.min(xi, xd), y1 = (xi < xd) ? yi : yd;
+    const x2 = Math.max(xi, xd), y2 = (xi < xd) ? yd : yi;
+
+    const dist = Math.hypot(x2 - x1, y2 - y1);
+    const gw = dist * 2.3;
+    if (glassesImg.naturalWidth > 0) {
+      const gh = gw * (glassesImg.naturalHeight / glassesImg.naturalWidth);
+      const cx = (x1 + x2) / 2, cy = (y1 + y2) / 2;
+      const angle = Math.atan2(y2 - y1, x2 - x1);
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(angle);
+      ctx.drawImage(glassesImg, -gw/2, -gh/2, gw, gh);
+      ctx.restore();
+    }
+    guideEl.style.display = 'none';
+  } else {
+    // Draw oval guide
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.ellipse(canvas.width/2, canvas.height/2,
+      canvas.width*0.22, canvas.height*0.35, 0, 0, 2*Math.PI);
+    ctx.stroke();
+    ctx.restore();
+    guideEl.style.display = 'block';
+  }
+});
+
+// Start camera
+async function startCamera() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'user', width: {ideal:640}, height: {ideal:480} }
+    });
+    video.srcObject = stream;
+    await video.play();
+    canvas.width = video.videoWidth || 640;
+    canvas.height = video.videoHeight || 480;
+    loadingEl.style.display = 'none';
+    container.style.display = 'block';
+    captureBtn.style.display = 'block';
+
+    async function processFrame() {
+      if (video.readyState >= 2) {
+        await faceMesh.send({image: video});
+      }
+      requestAnimationFrame(processFrame);
+    }
+    processFrame();
+  } catch(err) {
+    loadingEl.style.display = 'none';
+    errorEl.style.display = 'block';
+    console.error('Camera error:', err);
+  }
+}
+
+faceMesh.initialize().then(() => { startCamera(); });
+
+// Capture
+captureBtn.addEventListener('click', () => {
+  const link = document.createElement('a');
+  const nombre = glassesData[currentIdx] ? glassesData[currentIdx].nombre : 'captura';
+  link.download = 'mi-look-' + nombre.replace(/\s/g,'_') + '.png';
+  link.href = canvas.toDataURL('image/png');
+  link.click();
+});
+</script>
+</body>
+</html>
